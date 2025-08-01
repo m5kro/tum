@@ -14,11 +14,11 @@ print(f"Detected system type: {sys_type}")
 
 # Set config file location based on the system type
 if sys_type.startswith('win'):
-    config_file = os.path.join(os.getenv('APPDATA'), 'tuptime', 'config.json')
+    config_file = os.path.join(os.getenv('APPDATA'), 'tum', 'config.json')
 elif sys_type.startswith('linux'):
-    config_file = os.path.join(os.getenv('HOME'), '.config', 'tuptime', 'config.json')
+    config_file = os.path.join(os.getenv('HOME'), '.config', 'tum', 'config.json')
 elif sys_type.startswith('darwin'):
-    config_file = os.path.join(os.getenv('HOME'), 'Library', 'Application Support', 'tuptime', 'config.json')
+    config_file = os.path.join(os.getenv('HOME'), 'Library', 'Application Support', 'tum', 'config.json')
 
 def load_config():
     if not os.path.exists(config_file):
@@ -39,11 +39,11 @@ def save_config(cfg):
         print(f"Failed to save config: {e}")
 
 def show_help():
-    print("Usage: tuptime [options]")
+    print("Usage: tum [options]")
     print("Options:")
     print("  -h, --help               Show this help message and exit")
     print("  -c, --config             Show the current configuration")
-    print("  -v, --version            Show the version of tuptime")
+    print("  -v, --version            Show the version of tum")
     print("  -a, --add <name>         Add a new service to monitor (requires -t/--target)")
     print("  -r, --remove <name>      Remove a service from monitoring")
     print("  -s, --service <type>     Specify the service type (ICMP/SMB/FTP/HTTP/SSH)")
@@ -54,9 +54,9 @@ def show_help():
     print("  -t, --target <host>      Target hostname or IP address (required when adding)")
     print("  -d, --daemon <start|stop> Start or stop the background daemon")
     print("Example:")
-    print("  tuptime -a MyService -s ICMP -t 8.8.8.8 -i 30")
-    print("  tuptime -a Web -s HTTP -t example.com -p 8080")
-    print("  tuptime -d start")
+    print("  tum -a MyService -s ICMP -t 8.8.8.8 -i 30")
+    print("  tum -a Web -s HTTP -t example.com -p 8080")
+    print("  tum -d start")
 
 def add_service(name, service_type, interval, username, password, target, port):
     if not service_type:
@@ -117,7 +117,7 @@ def show_config():
 # Check for the config file and create default if missing
 if not os.path.exists(config_file):
     print(f"Config file not found: {config_file}")
-    print("This seems to be the first run of tuptime.")
+    print("This seems to be the first run of tum.")
     default_config = {"services": {}}
     os.makedirs(os.path.dirname(config_file), exist_ok=True)
     with open(config_file, 'w') as f:
@@ -127,12 +127,12 @@ else:
     print(f"Config file found: {config_file}")
 
 # take in parameters
-parser = argparse.ArgumentParser(prog='tuptime', add_help=False)
+parser = argparse.ArgumentParser(prog='tum', add_help=False)
 group = parser.add_mutually_exclusive_group()
 group.add_argument('-a', '--add', metavar='NAME', help='Add a new service to monitor')
 group.add_argument('-r', '--remove', metavar='NAME', help='Remove a service from monitoring')
 group.add_argument('-c', '--config', action='store_true', help='Show the current configuration')
-group.add_argument('-v', '--version', action='store_true', help='Show the version of tuptime')
+group.add_argument('-v', '--version', action='store_true', help='Show the version of tum')
 group.add_argument('-d', '--daemon', metavar='ACTION', choices=['start', 'stop'],
                    help='Start or stop the background daemon')
 
@@ -197,7 +197,7 @@ elif action == 'show_config':
     show_config()
     sys.exit(0)
 elif action == 'show_version':
-    print(f"tuptime version {VERSION}")
+    print(f"tum version {VERSION}")
     sys.exit(0)
 elif action and action.startswith('daemon_'):
     if action == 'daemon_start':

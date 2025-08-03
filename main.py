@@ -2,23 +2,24 @@ import os
 import sys
 import json
 import argparse
-#import daemon
+import signal
+import time
 from datetime import datetime
+
+import daemon
+from daemon.pidfile import PIDLockFile
 
 VERSION = "0.1"
 
-config_file = None
-# get the system os (windows, linux, mac)
-sys_type = sys.platform
-print(f"Detected system type: {sys_type}")
+# determine base directory
+if sys.platform.startswith('linux'):
+    base_dir = os.path.join(os.getenv('HOME'), '.config', 'tum')
+elif sys.platform.startswith('darwin'):
+    base_dir = os.path.join(os.getenv('HOME'), 'Library', 'Application Support', 'tum')
 
-# Set config file location based on the system type
-if sys_type.startswith('win'):
-    config_file = os.path.join(os.getenv('APPDATA'), 'tum', 'config.json')
-elif sys_type.startswith('linux'):
-    config_file = os.path.join(os.getenv('HOME'), '.config', 'tum', 'config.json')
-elif sys_type.startswith('darwin'):
-    config_file = os.path.join(os.getenv('HOME'), 'Library', 'Application Support', 'tum', 'config.json')
+config_file = os.path.join(base_dir, 'config.json')
+pidfile = os.path.join(base_dir, 'tum.pid')
+logfile = os.path.join(base_dir, 'tum.log')
 
 def load_config():
     if not os.path.exists(config_file):
@@ -52,11 +53,12 @@ def show_help():
     print("  -P, --password <password> Set the password for the service (SMB/FTP/SSH)")
     print("  -p, --port <port>        Set the port for the service (uses sensible defaults if omitted)")
     print("  -t, --target <host>      Target hostname or IP address (required when adding)")
-    print("  -d, --daemon <start|stop> Start or stop the background daemon")
+    print("  -d, --daemon <start|stop|status> Start, stop, or show status of the background daemon")
     print("Example:")
     print("  tum -a MyService -s ICMP -t 8.8.8.8 -i 30")
     print("  tum -a Web -s HTTP -t example.com -p 8080")
     print("  tum -d start")
+    print("  tum -d status")
 
 def add_service(name, service_type, interval, username, password, target, port):
     if not service_type:
@@ -65,7 +67,6 @@ def add_service(name, service_type, interval, username, password, target, port):
     if not target:
         print("Error: --target is required when adding a service.")
         return
-    # default ports per service type
     default_ports = {
         "ICMP": None,
         "SMB": 445,
@@ -114,7 +115,105 @@ def show_config():
     print("Current configuration:")
     print(json.dumps(cfg, indent=4))
 
-# Check for the config file and create default if missing
+def is_daemon_running():
+    if not os.path.exists(pidfile):
+        return False, None
+    try:
+        with open(pidfile, 'r') as f:
+            pid_str = f.read().strip()
+        if not pid_str:
+            return False, None
+        pid = int(pid_str)
+    except Exception:
+        return False, None
+    try:
+        os.kill(pid, 0)
+        return True, pid
+    except Exception:
+        return False, pid
+
+def daemon_worker():
+    def handle_term(signum, frame):
+        with open(logfile, "a+") as lf:
+            lf.write(f"{datetime.utcnow().isoformat()} - Received termination signal, exiting daemon.\n")
+        sys.exit(0)
+
+    signal.signal(signal.SIGTERM, handle_term)
+    signal.signal(signal.SIGHUP, signal.SIG_IGN)
+
+    with open(logfile, "a+") as lf:
+        lf.write(f"{datetime.utcnow().isoformat()} - Daemon worker started (pid {os.getpid()}).\n")
+
+    while True:
+        with open(logfile, "a+") as lf:
+            lf.write(f"{datetime.utcnow().isoformat()} - heartbeat\n")
+        time.sleep(60)
+
+def start_daemon():
+    running, pid = is_daemon_running()
+    if running:
+        print(f"Daemon already running (pid {pid}).")
+        return
+
+    os.makedirs(base_dir, exist_ok=True)
+    os.makedirs(os.path.dirname(logfile), exist_ok=True)
+
+    lock = PIDLockFile(pidfile)
+    try:
+        with open(logfile, "a+") as logf:
+            ctx = daemon.DaemonContext(
+                pidfile=lock,
+                stdout=logf,
+                stderr=logf,
+                umask=0o022,
+                working_directory=base_dir,
+                detach_process=True,
+            )
+            with ctx:
+                daemon_worker()
+    except Exception as e:
+        print(f"Failed to start daemon: {e}")
+
+def stop_daemon():
+    running, pid = is_daemon_running()
+    if not running:
+        if os.path.exists(pidfile):
+            print(f"PID file exists but process {pid} not alive; removing stale PID file.")
+            try:
+                os.remove(pidfile)
+            except Exception as e:
+                print(f"Could not remove stale pidfile: {e}")
+        else:
+            print("Daemon is not running.")
+        return
+
+    try:
+        os.kill(pid, signal.SIGTERM)
+        time.sleep(0.2)
+        if os.path.exists(pidfile):
+            os.remove(pidfile)
+        print(f"Sent SIGTERM to daemon (pid {pid}); stopped.")
+    except Exception as e:
+        print(f"Failed to stop daemon process {pid}: {e}")
+
+def show_daemon_status():
+    running, pid = is_daemon_running()
+    if running:
+        try:
+            mtime = os.path.getmtime(pidfile)
+            started = datetime.fromtimestamp(mtime)
+            age = datetime.now() - started
+            age_str = str(age).split('.')[0]
+            print(f"Daemon is running (pid {pid}), started {age_str} ago.")
+        except Exception:
+            print(f"Daemon is running (pid {pid}).")
+    else:
+        if pid:
+            print(f"Daemon PID file exists but process {pid} is not alive.")
+        else:
+            print("Daemon is not running.")
+
+# check if config file exists
 if not os.path.exists(config_file):
     print(f"Config file not found: {config_file}")
     print("This seems to be the first run of tum.")
@@ -133,8 +232,8 @@ group.add_argument('-a', '--add', metavar='NAME', help='Add a new service to mon
 group.add_argument('-r', '--remove', metavar='NAME', help='Remove a service from monitoring')
 group.add_argument('-c', '--config', action='store_true', help='Show the current configuration')
 group.add_argument('-v', '--version', action='store_true', help='Show the version of tum')
-group.add_argument('-d', '--daemon', metavar='ACTION', choices=['start', 'stop'],
-                   help='Start or stop the background daemon')
+group.add_argument('-d', '--daemon', metavar='ACTION', choices=['start', 'stop', 'status'],
+                   help='Start, stop, or show status of the background daemon')
 
 parser.add_argument('-s', '--service', metavar='TYPE', type=lambda s: s.upper(),
                     choices=['ICMP', 'SMB', 'FTP', 'HTTP', 'SSH'],
@@ -153,8 +252,8 @@ if args.help:
     show_help()
     sys.exit(0)
 
-# Map parsed args into variables
-action = None  # one of: 'add', 'remove', 'show_config', 'show_version', 'daemon_start', 'daemon_stop', or None
+# Determine action
+action = None
 service_name = None
 if args.add:
     action = 'add'
@@ -167,7 +266,7 @@ elif args.config:
 elif args.version:
     action = 'show_version'
 elif args.daemon:
-    action = f"daemon_{args.daemon}"  # 'daemon_start' or 'daemon_stop'
+    action = f"daemon_{args.daemon}"
 
 service_type = args.service 
 interval = args.interval
@@ -176,7 +275,7 @@ password = args.password
 port = args.port
 target = args.target
 
-# placeholder output
+# Debug / placeholder output
 print(f"Action: {action}")
 print(f"Service name: {service_name}")
 print(f"Service type: {service_type}")
@@ -186,7 +285,7 @@ print(f"Interval: {interval}")
 print(f"Username: {username}")
 print(f"Password: {'***' if password else None}")
 
-# Execute the chosen action
+# Dispatch
 if action == 'add':
     add_service(service_name, service_type, interval, username, password, target, port)
     sys.exit(0)
@@ -201,8 +300,9 @@ elif action == 'show_version':
     sys.exit(0)
 elif action and action.startswith('daemon_'):
     if action == 'daemon_start':
-        print("Starting daemon (not yet implemented).")
+        start_daemon()
     elif action == 'daemon_stop':
-        print("Stopping daemon (not yet implemented).")
+        stop_daemon()
+    elif action == 'daemon_status':
+        show_daemon_status()
     sys.exit(0)
-

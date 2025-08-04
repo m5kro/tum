@@ -4,7 +4,10 @@ import json
 import argparse
 import signal
 import time
-from datetime import datetime
+import threading
+import subprocess
+
+from datetime import datetime, timezone
 
 import daemon
 from daemon.pidfile import PIDLockFile
@@ -18,8 +21,9 @@ elif sys.platform.startswith('darwin'):
     base_dir = os.path.join(os.getenv('HOME'), 'Library', 'Application Support', 'tum')
 
 config_file = os.path.join(base_dir, 'config.json')
-pidfile = os.path.join(base_dir, 'tum.pid')
-logfile = os.path.join(base_dir, 'tum.log')
+pidfile     = os.path.join(base_dir, 'tum.pid')
+logfile     = os.path.join(base_dir, 'tum.log')
+metrics_dir = os.path.join(base_dir, 'metrics')
 
 def load_config():
     if not os.path.exists(config_file):
@@ -88,11 +92,7 @@ def add_service(name, service_type, interval, username, password, target, port):
         "port": port,
         "username": username or "",
         "password": password or "",
-        "interval": interval,
-        "isup": False,
-        "total_uptime": 0,        # in seconds
-        "total_downtime": 0,      # in seconds
-        "last_downtime": None     # ISO 8601 timestamp or None
+        "interval": interval
     }
     services[name] = entry
     cfg["services"] = services
@@ -120,10 +120,7 @@ def is_daemon_running():
         return False, None
     try:
         with open(pidfile, 'r') as f:
-            pid_str = f.read().strip()
-        if not pid_str:
-            return False, None
-        pid = int(pid_str)
+            pid = int(f.read().strip() or 0)
     except Exception:
         return False, None
     try:
@@ -132,24 +129,76 @@ def is_daemon_running():
     except Exception:
         return False, pid
 
+def monitor_icmp_service(name, svc):
+    target   = svc['target']
+    interval = svc.get('interval', 60)
+    os.makedirs(metrics_dir, exist_ok=True)
+    metrics_file = os.path.join(metrics_dir, f"{name}.json")
+    try:
+        with open(metrics_file, 'r') as f:
+            metrics = json.load(f)
+    except Exception:
+        metrics = {'isup': False, 'total_uptime': 0, 'total_downtime': 0, 'last_downtime': None}
+
+    while True:
+        try:
+            # Invoke system ping instead of pythonping
+            completed = subprocess.run(
+                ["ping", "-c", "1", target],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=interval
+            )
+            up = (completed.returncode == 0)
+        except subprocess.TimeoutExpired:
+            up = False
+        except Exception:
+            up = False
+
+        if up:
+            metrics['total_uptime'] += interval
+        else:
+            metrics['total_downtime'] += interval
+            if metrics.get('isup', True):
+                metrics['last_downtime'] = datetime.now(timezone.utc).isoformat()
+        metrics['isup'] = up
+
+        with open(metrics_file, 'w') as f:
+            json.dump(metrics, f, indent=4)
+
+        with open(logfile, 'a+') as lf:
+            status = 'UP' if up else 'DOWN'
+            lf.write(f"{datetime.now(timezone.utc).isoformat()} - ICMP '{name}' ({target}): {status}\n")
+
+        time.sleep(interval)
+
 def daemon_worker():
     def handle_term(signum, frame):
         with open(logfile, "a+") as lf:
-            lf.write(f"{datetime.utcnow().isoformat()} - Received termination signal, exiting daemon.\n")
+            lf.write(f"{datetime.now(timezone.utc).isoformat()} - Received termination signal, exiting daemon.\n")
         sys.exit(0)
 
     signal.signal(signal.SIGTERM, handle_term)
     signal.signal(signal.SIGHUP, signal.SIG_IGN)
 
-    with open(logfile, "a+") as lf:
-        lf.write(f"{datetime.utcnow().isoformat()} - Daemon worker started (pid {os.getpid()}).\n")
+    with open(logfile, 'a+') as lf:
+        lf.write(f"{datetime.now(timezone.utc).isoformat()} - Daemon started, spawning threads.\n")
 
-    while True:
-        with open(logfile, "a+") as lf:
-            lf.write(f"{datetime.utcnow().isoformat()} - heartbeat\n")
-        time.sleep(60)
+    cfg = load_config()
+    services = cfg.get('services', {})
+    threads = []
+    for name, svc in services.items():
+        if svc.get('service_type') == 'ICMP':
+            t = threading.Thread(target=monitor_icmp_service, args=(name, svc), daemon=True)
+            t.start()
+            threads.append(t)
+
+    for t in threads:
+        t.join()
+
 
 def start_daemon():
+    print("Starting daemon...")
     running, pid = is_daemon_running()
     if running:
         print(f"Daemon already running (pid {pid}).")
@@ -158,60 +207,39 @@ def start_daemon():
     os.makedirs(base_dir, exist_ok=True)
     os.makedirs(os.path.dirname(logfile), exist_ok=True)
 
+    with open(logfile, 'w') as logf:
+        logf.write(f"{datetime.now(timezone.utc).isoformat()} - Starting new daemon instance.\n")
+
     lock = PIDLockFile(pidfile)
-    try:
-        with open(logfile, "a+") as logf:
-            ctx = daemon.DaemonContext(
-                pidfile=lock,
-                stdout=logf,
-                stderr=logf,
-                umask=0o022,
-                working_directory=base_dir,
-                detach_process=True,
-            )
-            with ctx:
-                daemon_worker()
-    except Exception as e:
-        print(f"Failed to start daemon: {e}")
+    with open(logfile, 'a+') as logf:
+        ctx = daemon.DaemonContext(pidfile=lock, stdout=logf, stderr=logf,
+                                   umask=0o022, working_directory=base_dir)
+        with ctx:
+            daemon_worker()
 
 def stop_daemon():
     running, pid = is_daemon_running()
     if not running:
         if os.path.exists(pidfile):
-            print(f"PID file exists but process {pid} not alive; removing stale PID file.")
-            try:
-                os.remove(pidfile)
-            except Exception as e:
-                print(f"Could not remove stale pidfile: {e}")
-        else:
-            print("Daemon is not running.")
-        return
-
-    try:
-        os.kill(pid, signal.SIGTERM)
-        time.sleep(0.2)
-        if os.path.exists(pidfile):
             os.remove(pidfile)
-        print(f"Sent SIGTERM to daemon (pid {pid}); stopped.")
-    except Exception as e:
-        print(f"Failed to stop daemon process {pid}: {e}")
+        print("Daemon is not running.")
+        return
+    os.kill(pid, signal.SIGTERM)
+    time.sleep(0.2)
+    if os.path.exists(pidfile):
+        os.remove(pidfile)
+    print(f"Stopped daemon (pid {pid}).")
+
 
 def show_daemon_status():
     running, pid = is_daemon_running()
     if running:
-        try:
-            mtime = os.path.getmtime(pidfile)
-            started = datetime.fromtimestamp(mtime)
-            age = datetime.now() - started
-            age_str = str(age).split('.')[0]
-            print(f"Daemon is running (pid {pid}), started {age_str} ago.")
-        except Exception:
-            print(f"Daemon is running (pid {pid}).")
+        mtime = os.path.getmtime(pidfile)
+        age = datetime.now() - datetime.fromtimestamp(mtime)
+        age_str = str(age).split('.')[0]
+        print(f"Daemon running (pid {pid}), age {age_str}")
     else:
-        if pid:
-            print(f"Daemon PID file exists but process {pid} is not alive.")
-        else:
-            print("Daemon is not running.")
+        print("Daemon is not running.")
 
 # check if config file exists
 if not os.path.exists(config_file):
@@ -228,23 +256,23 @@ else:
 # take in parameters
 parser = argparse.ArgumentParser(prog='tum', add_help=False)
 group = parser.add_mutually_exclusive_group()
-group.add_argument('-a', '--add', metavar='NAME', help='Add a new service to monitor')
+group.add_argument('-a', '--add',    metavar='NAME', help='Add a new service to monitor')
 group.add_argument('-r', '--remove', metavar='NAME', help='Remove a service from monitoring')
 group.add_argument('-c', '--config', action='store_true', help='Show the current configuration')
-group.add_argument('-v', '--version', action='store_true', help='Show the version of tum')
-group.add_argument('-d', '--daemon', metavar='ACTION', choices=['start', 'stop', 'status'],
+group.add_argument('-v', '--version',action='store_true', help='Show the version of tum')
+group.add_argument('-d', '--daemon', metavar='ACTION', choices=['start','stop','status'],
                    help='Start, stop, or show status of the background daemon')
 
 parser.add_argument('-s', '--service', metavar='TYPE', type=lambda s: s.upper(),
-                    choices=['ICMP', 'SMB', 'FTP', 'HTTP', 'SSH'],
+                    choices=['ICMP','SMB','FTP','HTTP','SSH'],
                     help='Specify the service type (ICMP/SMB/FTP/HTTP/SSH)')
-parser.add_argument('-i', '--interval', metavar='SECONDS', type=int, default=60,
+parser.add_argument('-i', '--interval',metavar='SECONDS', type=int, default=60,
                     help='Set the monitoring interval (default: 60 seconds)')
-parser.add_argument('-u', '--username', metavar='USER', help='Set the username for the service (SMB/FTP/SSH)')
-parser.add_argument('-P', '--password', metavar='PASS', help='Set the password for the service (SMB/FTP/SSH)')
-parser.add_argument('-p', '--port', metavar='PORT', type=int, help='Port number for the service')
-parser.add_argument('-t', '--target', metavar='TARGET', help='Target hostname or IP address (required when adding)')
-parser.add_argument('-h', '--help', action='store_true', help='Show this help message and exit')
+parser.add_argument('-u', '--username',metavar='USER', help='Set the.username for the service (SMB/FTP/SSH)')
+parser.add_argument('-P', '--password',metavar='PASS', help='Set the.password for the service (SMB/FTP/SSH)')
+parser.add_argument('-p', '--port',    metavar='PORT', type=int, help='Port number for the service')
+parser.add_argument('-t', '--target',  metavar='TARGET', help='Target hostname or IP address (required when adding)')
+parser.add_argument('-h', '--help',    action='store_true', help='Show this help message and exit')
 
 args = parser.parse_args()
 
@@ -256,11 +284,9 @@ if args.help:
 action = None
 service_name = None
 if args.add:
-    action = 'add'
-    service_name = args.add
+    action = 'add';    service_name = args.add
 elif args.remove:
-    action = 'remove'
-    service_name = args.remove
+    action = 'remove'; service_name = args.remove
 elif args.config:
     action = 'show_config'
 elif args.version:
@@ -268,12 +294,12 @@ elif args.version:
 elif args.daemon:
     action = f"daemon_{args.daemon}"
 
-service_type = args.service 
-interval = args.interval
-username = args.username
-password = args.password
-port = args.port
-target = args.target
+service_type = args.service
+interval    = args.interval
+username    = args.username
+password    = args.password
+port        = args.port
+target      = args.target
 
 # Debug / placeholder output
 print(f"Action: {action}")
@@ -288,21 +314,15 @@ print(f"Password: {'***' if password else None}")
 # Dispatch
 if action == 'add':
     add_service(service_name, service_type, interval, username, password, target, port)
-    sys.exit(0)
 elif action == 'remove':
     remove_service(service_name)
-    sys.exit(0)
 elif action == 'show_config':
     show_config()
-    sys.exit(0)
 elif action == 'show_version':
     print(f"tum version {VERSION}")
-    sys.exit(0)
-elif action and action.startswith('daemon_'):
-    if action == 'daemon_start':
-        start_daemon()
-    elif action == 'daemon_stop':
-        stop_daemon()
-    elif action == 'daemon_status':
-        show_daemon_status()
-    sys.exit(0)
+elif action == 'daemon_start':
+    start_daemon()
+elif action == 'daemon_stop':
+    stop_daemon()
+elif action == 'daemon_status':
+    show_daemon_status()

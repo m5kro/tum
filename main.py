@@ -12,6 +12,14 @@ from datetime import datetime, timezone
 import daemon
 from daemon.pidfile import PIDLockFile
 
+import requests
+import urllib3
+from urllib.parse import urlparse
+# disable warnings for self-signed certs
+from requests.exceptions import SSLError, RequestException
+from urllib3.exceptions import InsecureRequestWarning
+urllib3.disable_warnings(InsecureRequestWarning)
+
 VERSION = "0.1"
 
 # determine base directory
@@ -64,7 +72,7 @@ def show_help():
     print("  tum -d start")
     print("  tum -d status")
 
-def add_service(name, service_type, interval, username, password, target, port):
+def add_service(name, service_type, interval, username, password, target, port, location):
     if not service_type:
         print("Error: --service is required when adding a service.")
         return
@@ -90,6 +98,7 @@ def add_service(name, service_type, interval, username, password, target, port):
         "service_type": service_type,
         "target": target,
         "port": port,
+        "location": location or "/",
         "username": username or "",
         "password": password or "",
         "interval": interval
@@ -172,6 +181,88 @@ def monitor_icmp_service(name, svc):
 
         time.sleep(interval)
 
+def monitor_http_service(name, svc):
+    """
+    Fetch a URL via HTTPS first (allowing self-signed), then HTTP on failure.
+    Splits any path off the given target into location if no -l/--location was set.
+    """
+    raw = svc['target']
+    arg_loc = svc.get('location', '').strip()
+    parsed = urlparse(raw)
+
+    # Hostname (no scheme, no port)
+    host = parsed.hostname or raw
+
+    # Determine port: explicit svc["port"] > parsed.port > default by scheme
+    if svc.get('port'):
+        port = svc['port']
+    elif parsed.port:
+        port = parsed.port
+    else:
+        port = 443 if parsed.scheme == 'https' else 80
+
+    # Determine location: CLI arg beats parsed.path; otherwise use parsed.path
+    if arg_loc != '/':
+        loc = arg_loc
+    else:
+        loc = parsed.path or '/'
+    # ensure leading slash
+    if not loc.startswith('/'):
+        loc = '/' + loc
+
+    if port == 80 or port == 443:
+        # If port is default for HTTP/HTTPS, don't include it in the URL
+        https_url = f"https://{host}{loc}"
+        http_url  = f"http://{host}{loc}"
+    else:
+        https_url = f"https://{host}:{port}{loc}"
+        http_url  = f"http://{host}:{port}{loc}"
+
+    interval = svc.get('interval', 60)
+    os.makedirs(metrics_dir, exist_ok=True)
+    metrics_file = os.path.join(metrics_dir, f"{name}.json")
+    try:
+        with open(metrics_file, 'r') as f:
+            metrics = json.load(f)
+    except Exception:
+        metrics = {'isup': False, 'total_uptime': 0,
+                   'total_downtime': 0, 'last_downtime': None}
+
+    while True:
+        up = False
+        # Try HTTPS first, then HTTP on SSL errors
+        for url in (https_url, http_url):
+            try:
+                resp = requests.get(url, timeout=interval, verify=False)
+                if 200 <= resp.status_code < 400:
+                    up = True
+                break
+            except SSLError:
+                # bad cert or TLS issue
+                continue
+            except RequestException:
+                # network error, timeout, DNS failure
+                break
+
+        if up:
+            metrics['total_uptime'] += interval
+        else:
+            metrics['total_downtime'] += interval
+            if metrics.get('isup', True):
+                metrics['last_downtime'] = datetime.now(timezone.utc).isoformat()
+        metrics['isup'] = up
+
+        with open(metrics_file, 'w') as f:
+            json.dump(metrics, f, indent=4)
+
+        # log which URL we actually tried
+        tried = up and https_url or http_url
+        with open(logfile, 'a+') as lf:
+            status = 'UP' if up else 'DOWN'
+            lf.write(f"{datetime.now(timezone.utc).isoformat()} - HTTP '{name}' ({tried}): {status}\n")
+
+        time.sleep(interval)
+
 def daemon_worker():
     def handle_term(signum, frame):
         with open(logfile, "a+") as lf:
@@ -188,8 +279,13 @@ def daemon_worker():
     services = cfg.get('services', {})
     threads = []
     for name, svc in services.items():
-        if svc.get('service_type') == 'ICMP':
+        svc_type = svc.get('service_type')
+        if svc_type == 'ICMP':
             t = threading.Thread(target=monitor_icmp_service, args=(name, svc), daemon=True)
+            t.start()
+            threads.append(t)
+        elif svc_type == 'HTTP':
+            t = threading.Thread(target=monitor_http_service, args=(name, svc), daemon=True)
             t.start()
             threads.append(t)
 
@@ -272,6 +368,8 @@ parser.add_argument('-u', '--username',metavar='USER', help='Set the.username fo
 parser.add_argument('-P', '--password',metavar='PASS', help='Set the.password for the service (SMB/FTP/SSH)')
 parser.add_argument('-p', '--port',    metavar='PORT', type=int, help='Port number for the service')
 parser.add_argument('-t', '--target',  metavar='TARGET', help='Target hostname or IP address (required when adding)')
+parser.add_argument('-l', '--location', metavar='LOCATION', default='',
+                    help='Location/path for HTTP (URL path) or SMB/FTP (folder/file) checks')
 parser.add_argument('-h', '--help',    action='store_true', help='Show this help message and exit')
 
 args = parser.parse_args()
@@ -300,6 +398,7 @@ username    = args.username
 password    = args.password
 port        = args.port
 target      = args.target
+location    = args.location
 
 # Debug / placeholder output
 print(f"Action: {action}")
@@ -313,7 +412,7 @@ print(f"Password: {'***' if password else None}")
 
 # Dispatch
 if action == 'add':
-    add_service(service_name, service_type, interval, username, password, target, port)
+    add_service(service_name, service_type, interval, username, password, target, port, location)
 elif action == 'remove':
     remove_service(service_name)
 elif action == 'show_config':

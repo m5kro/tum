@@ -20,6 +20,10 @@ from requests.exceptions import SSLError, RequestException
 from urllib3.exceptions import InsecureRequestWarning
 urllib3.disable_warnings(InsecureRequestWarning)
 
+from smb.SMBConnection import SMBConnection
+
+from ftplib import FTP, error_perm, all_errors
+
 VERSION = "0.1"
 
 # determine base directory
@@ -182,10 +186,8 @@ def monitor_icmp_service(name, svc):
         time.sleep(interval)
 
 def monitor_http_service(name, svc):
-    """
-    Fetch a URL via HTTPS first (allowing self-signed), then HTTP on failure.
-    Splits any path off the given target into location if no -l/--location was set.
-    """
+    # Fetch a URL via HTTPS first then HTTP on failure
+    
     raw = svc['target']
     arg_loc = svc.get('location', '').strip()
     parsed = urlparse(raw)
@@ -263,6 +265,140 @@ def monitor_http_service(name, svc):
 
         time.sleep(interval)
 
+def monitor_smb_service(name, svc):
+    # check SMB share and optionally verify access to a specific folder/file
+
+    raw       = svc['target']
+    parsed    = urlparse(raw if '://' in raw else f"//{raw}")
+    host      = parsed.hostname or raw
+    port      = svc.get('port', 445)
+    loc       = svc.get('location', '/').strip()
+    interval  = svc.get('interval', 60)
+
+    # parse share and optional subpath
+    parts  = loc.lstrip('/').split('/', 1)
+    share  = parts[0]
+    path   = parts[1] if len(parts) > 1 else ''
+
+    os.makedirs(metrics_dir, exist_ok=True)
+    metrics_file = os.path.join(metrics_dir, f"{name}.json")
+    try:
+        with open(metrics_file, 'r') as f:
+            metrics = json.load(f)
+    except Exception:
+        metrics = {
+            'isup': False,
+            'total_uptime':   0,
+            'total_downtime': 0,
+            'last_downtime':  None
+        }
+
+    while True:
+        up = False
+        try:
+            # connect to the share
+            conn = SMBConnection(
+                # connect as guest if no username provided
+                svc.get('username', 'GUEST'),
+                svc.get('password', ''),
+                'monitor-client',  # any client name
+                host,
+                use_ntlm_v2=True
+            )
+            if conn.connect(host, port, timeout=interval):
+                if path:
+                    # if they specified a file/folder, verify it exists
+                    dirname, filename = os.path.split(path)
+                    files = conn.listPath(share, dirname or '/')
+                    up = any(f.filename == filename for f in files)
+                else:
+                    # just connecting to the share is enough
+                    up = True
+                conn.close()
+        except Exception:
+            up = False
+
+        if up:
+            metrics['total_uptime'] += interval
+        else:
+            metrics['total_downtime'] += interval
+            if metrics.get('isup', True):
+                metrics['last_downtime'] = datetime.now(timezone.utc).isoformat()
+        metrics['isup'] = up
+
+        with open(metrics_file, 'w') as f:
+            json.dump(metrics, f, indent=4)
+
+        with open(logfile, 'a+') as lf:
+            status = 'UP' if up else 'DOWN'
+            lf.write(f"{datetime.now(timezone.utc).isoformat()} - SMB '{name}' ({host}/{share}{('/' + path) if path else ''}): {status}\n")
+
+        time.sleep(interval)
+
+def monitor_ftp_service(name, svc):
+    # Check FTP connectivity and optional access to a specific folder/file.
+
+    raw      = svc['target']
+    parsed   = urlparse(raw if '://' in raw else f"//{raw}")
+    host     = parsed.hostname or raw
+    port     = svc.get('port', 21)
+    loc      = svc.get('location', '/').strip()
+    interval = svc.get('interval', 60)
+
+    # normalize location
+    if not loc.startswith('/'):
+        loc = '/' + loc
+
+    os.makedirs(metrics_dir, exist_ok=True)
+    metrics_file = os.path.join(metrics_dir, f"{name}.json")
+    try:
+        with open(metrics_file, 'r') as f:
+            metrics = json.load(f)
+    except Exception:
+        metrics = {
+            'isup': False,
+            'total_uptime':   0,
+            'total_downtime': 0,
+            'last_downtime':  None
+        }
+
+    while True:
+        up = False
+        try:
+            ftp = FTP()
+            ftp.connect(host, port, timeout=interval)
+            # login (anonymous if no creds)
+            ftp.login(
+                user=svc.get('username') or 'anonymous',
+                passwd=svc.get('password') or ''
+            )
+            # if they specified a path, try to CWD there
+            if loc and loc != '/':
+                ftp.cwd(loc)
+            # attempt a simple directory listing
+            ftp.nlst()
+            up = True
+            ftp.quit()
+        except all_errors:
+            up = False
+
+        if up:
+            metrics['total_uptime'] += interval
+        else:
+            metrics['total_downtime'] += interval
+            if metrics.get('isup', True):
+                metrics['last_downtime'] = datetime.now(timezone.utc).isoformat()
+        metrics['isup'] = up
+
+        with open(metrics_file, 'w') as f:
+            json.dump(metrics, f, indent=4)
+
+        with open(logfile, 'a+') as lf:
+            status = 'UP' if up else 'DOWN'
+            lf.write(f"{datetime.now(timezone.utc).isoformat()} - FTP '{name}' ({host}{loc}): {status}\n")
+
+        time.sleep(interval)
+
 def daemon_worker():
     def handle_term(signum, frame):
         with open(logfile, "a+") as lf:
@@ -286,6 +422,14 @@ def daemon_worker():
             threads.append(t)
         elif svc_type == 'HTTP':
             t = threading.Thread(target=monitor_http_service, args=(name, svc), daemon=True)
+            t.start()
+            threads.append(t)
+        elif svc_type == 'SMB':
+            t = threading.Thread(target=monitor_smb_service, args=(name, svc), daemon=True)
+            t.start()
+            threads.append(t)
+        elif svc_type == 'FTP':
+            t = threading.Thread(target=monitor_ftp_service, args=(name, svc), daemon=True)
             t.start()
             threads.append(t)
 

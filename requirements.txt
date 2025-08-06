@@ -1,2 +1,4 @@
 python-daemon
 requests
+pysmb
+urllib3

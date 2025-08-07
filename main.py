@@ -24,6 +24,9 @@ from smb.SMBConnection import SMBConnection
 
 from ftplib import FTP, error_perm, all_errors
 
+import socket
+import paramiko
+
 VERSION = "0.1"
 
 # determine base directory
@@ -399,6 +402,70 @@ def monitor_ftp_service(name, svc):
 
         time.sleep(interval)
 
+def monitor_ssh_service(name, svc):
+    # Check SSH connectivity with provided credentials.
+    host     = svc['target']
+    port     = svc.get('port', 22)
+    user     = svc.get('username') or None
+    pwd      = svc.get('password') or None
+    interval = svc.get('interval', 60)
+
+    os.makedirs(metrics_dir, exist_ok=True)
+    metrics_file = os.path.join(metrics_dir, f"{name}.json")
+    try:
+        with open(metrics_file, 'r') as f:
+            metrics = json.load(f)
+    except Exception:
+        metrics = {
+            'isup': False,
+            'total_uptime':   0,
+            'total_downtime': 0,
+            'last_downtime':  None
+        }
+
+    while True:
+        up = False
+        try:
+            # Try a TCP-level check first
+            sock = socket.create_connection((host, port), timeout=interval)
+            sock.close()
+
+            # If creds given, attempt SSH auth
+            if user:
+                client = paramiko.SSHClient()
+                client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+                client.connect(
+                    hostname=host,
+                    port=port,
+                    username=user,
+                    password=pwd,
+                    timeout=interval,
+                    allow_agent=False,
+                    look_for_keys=False
+                )
+                client.close()
+
+            up = True
+        except Exception:
+            up = False
+
+        if up:
+            metrics['total_uptime'] += interval
+        else:
+            metrics['total_downtime'] += interval
+            if metrics.get('isup', True):
+                metrics['last_downtime'] = datetime.now(timezone.utc).isoformat()
+        metrics['isup'] = up
+
+        with open(metrics_file, 'w') as f:
+            json.dump(metrics, f, indent=4)
+
+        with open(logfile, 'a+') as lf:
+            status = 'UP' if up else 'DOWN'
+            lf.write(f"{datetime.now(timezone.utc).isoformat()} - SSH '{name}' ({host}:{port}): {status}\n")
+
+        time.sleep(interval)
+
 def daemon_worker():
     def handle_term(signum, frame):
         with open(logfile, "a+") as lf:
@@ -432,10 +499,13 @@ def daemon_worker():
             t = threading.Thread(target=monitor_ftp_service, args=(name, svc), daemon=True)
             t.start()
             threads.append(t)
+        elif svc_type == 'SSH':
+            t = threading.Thread(target=monitor_ssh_service, args=(name, svc), daemon=True)
+            t.start()
+            threads.append(t)
 
     for t in threads:
         t.join()
-
 
 def start_daemon():
     print("Starting daemon...")

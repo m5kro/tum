@@ -2,3 +2,4 @@ python-daemon
 requests
 pysmb
 urllib3
+paramiko

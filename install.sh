@@ -11,3 +11,6 @@ echo "Making the tum script executable..."
 chmod +x $HOME/.local/share/tum/tum
 echo "linking the tum script to /usr/local/bin..."
 ln -sf $HOME/.local/share/tum/tum $HOME/.local/bin/tum
+echo "Cleaning up..."
+rm -rf tum.zip
+echo "Installation complete! You can now run tum from anywhere by typing 'tum' in your terminal."

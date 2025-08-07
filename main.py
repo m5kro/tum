@@ -15,7 +15,7 @@ from daemon.pidfile import PIDLockFile
 import requests
 import urllib3
 from urllib.parse import urlparse
-# disable warnings for self-signed certs
+# Disable warnings for self-signed certs
 from requests.exceptions import SSLError, RequestException
 from urllib3.exceptions import InsecureRequestWarning
 urllib3.disable_warnings(InsecureRequestWarning)
@@ -27,9 +27,17 @@ from ftplib import FTP, error_perm, all_errors
 import socket
 import paramiko
 
-VERSION = "0.1"
+VERSION = "1.0.0"
 
-# determine base directory
+# Text coloring
+class bcolors:
+    HEADER = '\033[95m'
+    OKGREEN = '\033[92m'
+    WARNING = '\033[93m'
+    FAIL = '\033[91m'
+    ENDC = '\033[0m'
+
+# Determine base directory
 if sys.platform.startswith('linux'):
     base_dir = os.path.join(os.getenv('HOME'), '.config', 'tum')
 elif sys.platform.startswith('darwin'):
@@ -47,7 +55,7 @@ def load_config():
         with open(config_file, 'r') as f:
             return json.load(f)
     except Exception as e:
-        print(f"Failed to load config: {e}")
+        print(bcolors.FAIL + f"Failed to load config: {e}" + bcolors.ENDC)
         return {}
 
 def save_config(cfg):
@@ -56,7 +64,7 @@ def save_config(cfg):
         with open(config_file, 'w') as f:
             json.dump(cfg, f, indent=4)
     except Exception as e:
-        print(f"Failed to save config: {e}")
+        print(bcolors.FAIL + f"Failed to save config: {e}" + bcolors.ENDC)
 
 def show_help():
     print("Usage: tum [options]")
@@ -64,7 +72,7 @@ def show_help():
     print("  -h, --help               Show this help message and exit")
     print("  -c, --config             Show the current configuration")
     print("  -v, --version            Show the version of tum")
-    print("  -a, --add <name>         Add a new service to monitor (requires -t/--target)")
+    print("  -a, --add <name>         Add a new service to monitor (requires -t/--target and -s/--service)")
     print("  -r, --remove <name>      Remove a service from monitoring")
     print("  -s, --service <type>     Specify the service type (ICMP/SMB/FTP/HTTP/SSH)")
     print("  -i, --interval <seconds> Set the monitoring interval (default: 60 seconds)")
@@ -81,10 +89,10 @@ def show_help():
 
 def add_service(name, service_type, interval, username, password, target, port, location):
     if not service_type:
-        print("Error: --service is required when adding a service.")
+        print(bcolors.FAIL + "Error: --service is required when adding a service." + bcolors.ENDC)
         return
     if not target:
-        print("Error: --target is required when adding a service.")
+        print(bcolors.FAIL + "Error: --target is required when adding a service." + bcolors.ENDC)
         return
     default_ports = {
         "ICMP": None,
@@ -98,7 +106,7 @@ def add_service(name, service_type, interval, username, password, target, port, 
     cfg = load_config()
     services = cfg.get("services", {})
     if name in services:
-        print(f"Service '{name}' already exists in config.")
+        print(bcolors.WARNING + f"Service '{name}' already exists in config." + bcolors.ENDC)
         return
     entry = {
         "name": name,
@@ -113,18 +121,18 @@ def add_service(name, service_type, interval, username, password, target, port, 
     services[name] = entry
     cfg["services"] = services
     save_config(cfg)
-    print(f"Added service '{name}' with type {service_type}, target {target}, port {port} to config.")
+    print(bcolors.OKGREEN + f"Added service '{name}' with type {service_type}, target {target}, port {port} to config." + bcolors.ENDC)
 
 def remove_service(name):
     cfg = load_config()
     services = cfg.get("services", {})
     if name not in services:
-        print(f"Service '{name}' not found in config.")
+        print(bcolors.WARNING + f"Service '{name}' not found in config." + bcolors.ENDC)
         return
     del services[name]
     cfg["services"] = services
     save_config(cfg)
-    print(f"Removed service '{name}' from config.")
+    print(bcolors.OKGREEN + f"Removed service '{name}' from config." + bcolors.ENDC)
 
 def show_config():
     cfg = load_config()
@@ -145,6 +153,63 @@ def is_daemon_running():
     except Exception:
         return False, pid
 
+def format_duration(seconds):
+    # Skipping leading zero units for time
+    total = int(seconds)
+    days, remainder = divmod(total, 86400)
+    hours, remainder = divmod(remainder, 3600)
+    minutes, secs = divmod(remainder, 60)
+    parts = []
+    if days:
+        parts.append(f"{days}d")
+    if hours or parts:
+        parts.append(f"{hours}h")
+    if minutes or parts:
+        parts.append(f"{minutes}m")
+    # Always include seconds
+    parts.append(f"{secs}s")
+    return " ".join(parts)
+
+def show_status_all_services():
+    if not is_daemon_running()[0]:
+        print(bcolors.WARNING + "Daemon is not running. Start with 'tum -d start'." + bcolors.ENDC)
+        return
+    
+    cfg = load_config()
+    services = cfg.get("services", {})
+    if not services:
+        print(bcolors.WARNING + "No services configured." + bcolors.ENDC)
+        return
+
+    print("Service status:")
+    for name, svc in services.items():
+        metrics_file = os.path.join(metrics_dir, f"{name}.json")
+        try:
+            with open(metrics_file, 'r') as f:
+                metrics = json.load(f)
+        except Exception:
+            print(f"- {name} ({svc['service_type']}): no metrics available yet")
+            continue
+
+        status = (bcolors.OKGREEN + "UP" + bcolors.ENDC) if metrics.get("isup") else (bcolors.FAIL + "DOWN" + bcolors.ENDC)
+
+        uptime = metrics.get("total_uptime", 0)
+        downtime = metrics.get("total_downtime", 0)
+        total_time = uptime + downtime
+        up_pct = (uptime / total_time * 100) if total_time > 0 else 0
+        down_pct = (downtime / total_time * 100) if total_time > 0 else 0
+
+        print(bcolors.HEADER + f"- {name} ({svc['service_type']}): {status}" + bcolors.ENDC)
+        print(f"    Target:   {svc['target']}")
+        print(f"    Uptime:   {up_pct:.2f}% ({format_duration(uptime)})")
+        print(f"    Downtime: {down_pct:.2f}% ({format_duration(downtime)})")
+
+        last_down = metrics.get("last_downtime")
+        if last_down:
+            print(f"    Last downtime: {last_down}")
+        else:
+            print("    Last downtime: N/A")
+
 def monitor_icmp_service(name, svc):
     target   = svc['target']
     interval = svc.get('interval', 60)
@@ -158,7 +223,7 @@ def monitor_icmp_service(name, svc):
 
     while True:
         try:
-            # Invoke system ping instead of pythonping
+            # Invoke system ping to bypass root requirements
             completed = subprocess.run(
                 ["ping", "-c", "1", target],
                 stdout=subprocess.DEVNULL,
@@ -211,7 +276,7 @@ def monitor_http_service(name, svc):
         loc = arg_loc
     else:
         loc = parsed.path or '/'
-    # ensure leading slash
+    # Ensure leading slash
     if not loc.startswith('/'):
         loc = '/' + loc
 
@@ -243,10 +308,10 @@ def monitor_http_service(name, svc):
                     up = True
                 break
             except SSLError:
-                # bad cert or TLS issue
+                # Bad cert or TLS issue
                 continue
             except RequestException:
-                # network error, timeout, DNS failure
+                # Network error, timeout, DNS failure
                 break
 
         if up:
@@ -260,7 +325,6 @@ def monitor_http_service(name, svc):
         with open(metrics_file, 'w') as f:
             json.dump(metrics, f, indent=4)
 
-        # log which URL we actually tried
         tried = up and https_url or http_url
         with open(logfile, 'a+') as lf:
             status = 'UP' if up else 'DOWN'
@@ -269,7 +333,7 @@ def monitor_http_service(name, svc):
         time.sleep(interval)
 
 def monitor_smb_service(name, svc):
-    # check SMB share and optionally verify access to a specific folder/file
+    # Check SMB share and optionally verify access to a specific folder/file
 
     raw       = svc['target']
     parsed    = urlparse(raw if '://' in raw else f"//{raw}")
@@ -278,7 +342,7 @@ def monitor_smb_service(name, svc):
     loc       = svc.get('location', '/').strip()
     interval  = svc.get('interval', 60)
 
-    # parse share and optional subpath
+    # Parse share and optional subpath
     parts  = loc.lstrip('/').split('/', 1)
     share  = parts[0]
     path   = parts[1] if len(parts) > 1 else ''
@@ -299,23 +363,23 @@ def monitor_smb_service(name, svc):
     while True:
         up = False
         try:
-            # connect to the share
+            # Connect to the share
             conn = SMBConnection(
-                # connect as guest if no username provided
+                # Connect as guest if no username provided
                 svc.get('username', 'GUEST'),
                 svc.get('password', ''),
-                'monitor-client',  # any client name
+                'monitor-client',  # Any client name
                 host,
                 use_ntlm_v2=True
             )
             if conn.connect(host, port, timeout=interval):
                 if path:
-                    # if they specified a file/folder, verify it exists
+                    # If they specified a file/folder, verify it exists
                     dirname, filename = os.path.split(path)
                     files = conn.listPath(share, dirname or '/')
                     up = any(f.filename == filename for f in files)
                 else:
-                    # just connecting to the share is enough
+                    # Just connecting to the share is enough
                     up = True
                 conn.close()
         except Exception:
@@ -348,7 +412,7 @@ def monitor_ftp_service(name, svc):
     loc      = svc.get('location', '/').strip()
     interval = svc.get('interval', 60)
 
-    # normalize location
+    # Normalize location
     if not loc.startswith('/'):
         loc = '/' + loc
 
@@ -370,15 +434,15 @@ def monitor_ftp_service(name, svc):
         try:
             ftp = FTP()
             ftp.connect(host, port, timeout=interval)
-            # login (anonymous if no creds)
+            # Login (anonymous if no creds)
             ftp.login(
                 user=svc.get('username') or 'anonymous',
                 passwd=svc.get('password') or ''
             )
-            # if they specified a path, try to CWD there
+            # If they specified a path, try to CWD there
             if loc and loc != '/':
                 ftp.cwd(loc)
-            # attempt a simple directory listing
+            # Attempt a simple directory listing
             ftp.nlst()
             up = True
             ftp.quit()
@@ -511,7 +575,7 @@ def start_daemon():
     print("Starting daemon...")
     running, pid = is_daemon_running()
     if running:
-        print(f"Daemon already running (pid {pid}).")
+        print(bcolors.WARNING + f"Daemon already running (pid {pid})." + bcolors.ENDC)
         return
 
     os.makedirs(base_dir, exist_ok=True)
@@ -532,7 +596,7 @@ def stop_daemon():
     if not running:
         if os.path.exists(pidfile):
             os.remove(pidfile)
-        print("Daemon is not running.")
+        print(bcolors.WARNING + "Daemon is not running." + bcolors.ENDC)
         return
     os.kill(pid, signal.SIGTERM)
     time.sleep(0.2)
@@ -551,19 +615,17 @@ def show_daemon_status():
     else:
         print("Daemon is not running.")
 
-# check if config file exists
+# Check if config file exists
 if not os.path.exists(config_file):
-    print(f"Config file not found: {config_file}")
+    print(bcolors.WARNING + f"Config file not found: {config_file}" + bcolors.ENDC)
     print("This seems to be the first run of tum.")
     default_config = {"services": {}}
     os.makedirs(os.path.dirname(config_file), exist_ok=True)
     with open(config_file, 'w') as f:
         json.dump(default_config, f, indent=4)
-    print(f"Default config file created: {config_file}")
-else:
-    print(f"Config file found: {config_file}")
+    print(bcolors.OKGREEN + f"Default config file created: {config_file}" + bcolors.ENDC)
 
-# take in parameters
+# Take in parameters
 parser = argparse.ArgumentParser(prog='tum', add_help=False)
 group = parser.add_mutually_exclusive_group()
 group.add_argument('-a', '--add',    metavar='NAME', help='Add a new service to monitor')
@@ -614,16 +676,6 @@ port        = args.port
 target      = args.target
 location    = args.location
 
-# Debug / placeholder output
-print(f"Action: {action}")
-print(f"Service name: {service_name}")
-print(f"Service type: {service_type}")
-print(f"Target: {target}")
-print(f"Port: {port}")
-print(f"Interval: {interval}")
-print(f"Username: {username}")
-print(f"Password: {'***' if password else None}")
-
 # Dispatch
 if action == 'add':
     add_service(service_name, service_type, interval, username, password, target, port, location)
@@ -639,3 +691,5 @@ elif action == 'daemon_stop':
     stop_daemon()
 elif action == 'daemon_status':
     show_daemon_status()
+elif action == None:
+    show_status_all_services()

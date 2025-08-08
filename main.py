@@ -27,7 +27,7 @@ from ftplib import FTP, error_perm, all_errors
 import socket
 import paramiko
 
-VERSION = "1.0.0"
+VERSION = "1.0.1"
 
 # Text coloring
 class bcolors:
@@ -572,6 +572,13 @@ def daemon_worker():
         t.join()
 
 def start_daemon():
+    # Ensure at least one service is configured
+    cfg = load_config()
+    if not cfg.get('services'):
+        print(bcolors.WARNING + "No services configured. Please add a service before starting the daemon." + bcolors.ENDC)
+        print(bcolors.WARNING + "Example: tum -a Cloudflare -s ICMP -t 1.1.1.1 -i 5" + bcolors.ENDC)
+        return
+
     print("Starting daemon...")
     running, pid = is_daemon_running()
     if running:

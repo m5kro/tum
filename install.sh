@@ -4,7 +4,7 @@ if ! command -v unzip &> /dev/null; then
     exit 1
 fi
 echo "Downloading the latest release of tum..."
-curl -fsSL "https://github.com/m5kro/tum/releases/download/1.0.0/tum.zip" -o tum.zip
+curl -fsSL "https://github.com/m5kro/tum/releases/download/1.0.1/tum.zip" -o tum.zip
 echo "Unzipping the downloaded file..."
 unzip -o tum.zip -d $HOME/.local/share/
 echo "Making the tum script executable..."

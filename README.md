@@ -8,14 +8,14 @@ Example:<br>
 <img src="tum-example.png" height="300">
 
 # Install
-### Linux
+### Linux x86
 Here is a one line installer for tum:<br>
 `curl -fsSL https://raw.githubusercontent.com/m5kro/tum/refs/heads/main/install.sh | bash`<br>
 <br>
 To uninstall (may need root):<br>
 `rm -rf /usr/local/bin/tum && rm -rf /usr/local/share/tum`
 
-### MacOS
+### MacOS / Other Arch
 Please refer to the build section, as I don't provide MacOS builds.
 
 ## How to Use

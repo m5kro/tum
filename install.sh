@@ -3,6 +3,13 @@ if ! command -v unzip &> /dev/null; then
     echo "unzip could not be found, please install it to continue."
     exit 1
 fi
+
+if [[ $(uname -m) != "x86_64" ]]; then
+    echo "This build is intended for x86_64 systems only. You are running on $(uname -m)."
+    echo "Please manually build from source if you need to run on this architecture."
+    echo "Instructions for building from source can be found at https://github.com/m5kro/tum#how-to-build"
+    exit 1
+fi
 echo "Downloading the latest release of tum..."
 curl -fsSL "https://github.com/m5kro/tum/releases/download/1.0.1/tum.zip" -o tum.zip
 echo "Unzipping the downloaded file..."

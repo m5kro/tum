@@ -12,8 +12,8 @@ Example:<br>
 Here is a one line installer for tum:<br>
 `curl -fsSL https://raw.githubusercontent.com/m5kro/tum/refs/heads/main/install.sh | bash`<br>
 <br>
-To uninstall:<br>
-`rm -rf $HOME/.local/bin/tum && rm -rf $HOME/.local/share/tum`
+To uninstall (may need root):<br>
+`rm -rf /usr/local/bin/tum && rm -rf /usr/local/share/tum`
 
 ### MacOS
 Please refer to the build section, as I don't provide MacOS builds.
